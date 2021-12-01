@@ -4,10 +4,10 @@ import sttp.tapir._
 import sttp.tapir.json.circe._
 
 object eio {
-  type ProvidedEndpointInput[T] = EndpointInput[T] { type Provided = true }
-  type ProvidedEndpointOutput[T] = EndpointOutput[T] { type Provided = true }
+  case class ProvidedEndpointInput[T](instance: EndpointInput[T]) extends AnyVal
+  case class ProvidedEndpointOutput[T](instance: EndpointOutput[T]) extends AnyVal
   object ProvidedEndpointOutput {
-    implicit val psc: ProvidedEndpointOutput[StatusCode] = statusCode.asInstanceOf[ProvidedEndpointOutput[StatusCode]]
+    implicit val psc: ProvidedEndpointOutput[StatusCode] = ProvidedEndpointOutput(statusCode)
   }
   type ProvidedCodec[L, H, +CF <: CodecFormat] = sttp.tapir.Codec[L, H, CF] { type Provided = true }
 
@@ -16,16 +16,16 @@ object eio {
   }
   object EndpointInputConstructor {
     implicit def constructorForJsonTag[V: Decoder: Encoder: Schema]: EndpointInputConstructor[V, DefTags.JsonDefTag] = new EndpointInputConstructor[V, DefTags.JsonDefTag] {
-      override val instance: ProvidedEndpointInput[V] = jsonBody[V].asInstanceOf[ProvidedEndpointInput[V]]
+      override val instance: ProvidedEndpointInput[V] = ProvidedEndpointInput(jsonBody[V])
     }
   }
 
   trait EndpointOutputConstructor[V, DefTag] {
-    def instance: ProvidedEndpointOutput[V]
+    def instance: EndpointOutput[V]
   }
   object EndpointOutputConstructor {
     implicit def constructorForJsonTag[V: Decoder: Encoder: Schema]: EndpointOutputConstructor[V, DefTags.JsonDefTag] = new EndpointOutputConstructor[V, DefTags.JsonDefTag] {
-      override val instance: ProvidedEndpointOutput[V] = jsonBody[V].asInstanceOf[ProvidedEndpointOutput[V]]
+      override val instance: EndpointOutput[V] = jsonBody[V]
     }
   }
 

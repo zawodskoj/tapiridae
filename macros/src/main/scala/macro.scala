@@ -128,7 +128,7 @@ object makro {
                 }
                 case None => c.abort(c.enclosingPosition, s"Failed to find PEO and no defaultBody was found")
               }
-              case t => Some(DecodedOutType(t))
+              case t => Some(DecodedOutType(q"$t.instance"))
             }
           }
 

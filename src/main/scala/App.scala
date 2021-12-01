@@ -3,7 +3,6 @@ import cats.Monad
 import sttp.model.StatusCode
 import sttp.tapir._
 import sttp.tapir.server.ServerEndpoint
-import eio.ProvidedEndpointOutput._
 import eio.Security
 
 import scala.language.experimental.macros
