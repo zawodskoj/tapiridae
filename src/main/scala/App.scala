@@ -10,6 +10,7 @@ import scala.language.experimental.macros
 object App {
   type IO[X] = X
 
+  @defaultBody[json]
   class Wtf extends Controller[IO] {
     @path("a/{foo}/c/{qux}")
     def x(

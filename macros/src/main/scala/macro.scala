@@ -1,3 +1,4 @@
+import attrs.{json, defaultBody, DefaultBody}
 import eio._
 
 import scala.reflect.macros.blackbox
@@ -92,6 +93,14 @@ object makro {
         errType: Option[DecodedOutType]
       )
 
+      val defBody =  clsTpe.typeSymbol.annotations.map(a => c.typecheck(a.tree.duplicate)).collectFirst {
+        case tree if tree.tpe.typeConstructor == weakTypeOf[defaultBody[DefaultBody]].typeConstructor =>
+          tree.tpe.typeArgs.head match {
+            case t if t.typeSymbol == symbolOf[json] => weakTypeOf[DefTags.JsonDefTag]
+            case t => c.abort(c.enclosingPosition, s"Unknown defType $t")
+          }
+      }
+
       val outputType = {
         def decodeOutputType(tpe: Type, async: Boolean): DecodedOutTypes = {
           def decodeExactOutputType(tpe: Type): Option[DecodedOutType] = {
@@ -100,9 +109,12 @@ object makro {
             if (dealiased.typeSymbol == symbolOf[Unit]) return None
 
             c.inferImplicitValue(appliedType(weakTypeOf[ProvidedEndpointOutput[_]].typeConstructor, dealiased)) match {
-              case EmptyTree => c.inferImplicitValue(appliedType(weakTypeOf[EndpointOutputConstructor[_, _]], dealiased, typeOf[DefTags.JsonDefTag])) match {
-                case EmptyTree => c.abort(c.enclosingPosition, s"Failed to find PEO or EOC for type $tpe (dealiased to $dealiased)")
-                case t => Some(DecodedOutType(q"$t.instance"))
+              case EmptyTree => defBody match {
+                case Some(defBody) => c.inferImplicitValue(appliedType(weakTypeOf[EndpointOutputConstructor[_, _]], dealiased, defBody)) match {
+                  case EmptyTree => c.abort(c.enclosingPosition, s"Failed to find PEO or EOC for type $tpe (dealiased to $dealiased)")
+                  case t => Some(DecodedOutType(q"$t.instance"))
+                }
+                case None => c.abort(c.enclosingPosition, s"Failed to find PEO and no defaultBody was found")
               }
               case t => Some(DecodedOutType(t))
             }
