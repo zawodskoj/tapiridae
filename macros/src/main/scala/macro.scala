@@ -15,6 +15,7 @@ object makro {
     object Input {
       case class Path(name: String, tpe: c.Type) extends Input
       case class NonPath(tree: c.Tree) extends Input
+      case class Security(sec: c.Tree) extends Input
     }
 
     case class IndexedInput(input: Input, index: Int)
@@ -26,6 +27,7 @@ object makro {
 
     val pathAttrSym = symbolOf[attrs.path]
     val queryAttrSym = symbolOf[attrs.query]
+    val securityAttrSym = symbolOf[attrs.security]
 
     val endpoints = clsTpe.decls.collect {
       case d if d.isMethod && d.isPublic && !d.isConstructor && d.asMethod.paramLists.size == 1 => d.asMethod
@@ -57,6 +59,10 @@ object makro {
 
         val inputAnnotations: List[Input] = param.annotations.map(_.tree).collect {
           case q"new $attr" if attr.symbol == queryAttrSym => Input.NonPath(q"_root_.sttp.tapir.query[$paramTpe]($paramName)")
+          case q"new $attr" if attr.symbol == securityAttrSym => c.inferImplicitValue(appliedType(weakTypeOf[Security[_, _, F]].typeConstructor, WildcardType, paramTpe, fTpe)) match {
+            case EmptyTree => c.abort(c.enclosingPosition, s"Failed to find Security instance for type $paramTpe")
+            case sec => Input.Security(sec)
+          }
         }
 
         inputAnnotations match {
@@ -75,11 +81,17 @@ object makro {
 
         val pathInputs = inputs.collect { case p: Input.Path => p }
         val nonPathInputs = inputs.collect { case np: Input.NonPath => np }
+        val secInputs = inputs.collect { case np: Input.Security => np }
+
+        if (secInputs.size > 1) {
+          c.abort(c.enclosingPosition, "Multiple secure endpoints are not supported now")
+        }
 
         val indexedPathInputs = pathInputs.map(p => IndexedInput(p, segmentedPath.collect { case s: PathSegment.Subst => s }.indexWhere(_.name == p.name)))
-        val indexedNonPathInputs = nonPathInputs.zipWithIndex.map { case (np, i) => IndexedInput(np, i + pathInputsCount) }
+        val indexedNonPathInputs = nonPathInputs.zipWithIndex.map { case (np, i) => IndexedInput(np, i + indexedPathInputs.size) }
+        val indexedSecInputs = secInputs.zipWithIndex.map { case (np, i) => IndexedInput(np, -1) }
 
-        val indexedInputsUnordered = indexedPathInputs ++ indexedNonPathInputs
+        val indexedInputsUnordered = indexedPathInputs ++ indexedSecInputs ++ indexedNonPathInputs
 
         inputs.map { i => indexedInputsUnordered.find(_.input == i).get }
       }
@@ -142,8 +154,14 @@ object makro {
 
       println(outputType)
 
-      val tupleMappingTree = {
-        val args = indexedInputs.map(i => q"t.${TermName("_" + (i.index + 1))}")
+      def tupleMappingTree(hasSec: Boolean) = {
+        val args = if (hasSec)
+          indexedInputs.map {
+            case IndexedInput(_, -1) =>  q"t._1"
+            case IndexedInput(_, ix) =>  q"t._2.${TermName("_" + (ix + 1))}"
+          }
+        else
+          indexedInputs.map(i => q"t.${TermName("_" + (i.index + 1))}")
         val rawBody = q"$cls.$methodName(..$args)"
         val monadForF = q"_root_.cats.Monad[$fTpe]"
 
@@ -157,10 +175,11 @@ object makro {
         q"{ import _root_.cats.syntax.either._; val monadF = $monadForF; t => $wrappedBody }"
       }
 
-      val endpointDef = {
-        val pathInputs = inputs.collect { case p: Input.Path => p }
-        val nonPathInputs = inputs.collect { case np: Input.NonPath => np }
+      val pathInputs = inputs.collect { case p: Input.Path => p }
+      val secInputs = inputs.collect { case np: Input.Security => np }
+      val nonPathInputs = inputs.collect { case np: Input.NonPath => np }
 
+      val endpointDef = {
         val pathNodes = segmentedPath.map {
           case PathSegment.Raw(r) =>
             Literal(Constant(r))
@@ -171,9 +190,14 @@ object makro {
 
         val pathInput = pathNodes.reduce((l, r) => q"$l / $r")
 
-        val endpointWithPath = q"endpoint.post.in($pathInput)"
+        val endpointWithMethod: Tree = q"endpoint.post"
 
-        val withInputs = nonPathInputs.foldLeft(endpointWithPath)((e, i) => q"$e.in(${i.tree})")
+        val withInputs = {
+          val withSecInputs = secInputs.foldLeft(endpointWithMethod)((e, i) => q"$e.in(${i.sec}.input).serverLogicForCurrent(${i.sec}.handler)")
+          val withPath = q"$withSecInputs.in($pathInput)"
+
+          nonPathInputs.foldLeft(withPath)((e, i) => q"$e.in(${i.tree})")
+        }
 
         val withOutputs = outputType.outType match {
           case Some(out) => q"$withInputs.out(${out.eo})"
@@ -188,7 +212,12 @@ object makro {
         withErrors
       }
 
-      q"$endpointDef.serverLogic[$fTpe]($tupleMappingTree)"
+      val hasSec = secInputs.nonEmpty
+
+      if (hasSec)
+        q"$endpointDef.serverLogic(${tupleMappingTree(hasSec)})"
+      else
+        q"$endpointDef.serverLogic[$fTpe](${tupleMappingTree(hasSec)})"
     }
 
     println(endpoints)

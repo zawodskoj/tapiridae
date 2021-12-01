@@ -32,4 +32,9 @@ object eio {
   object DefTags {
     trait JsonDefTag
   }
+
+  trait Security[VIn, VOut, F[_]] {
+    val input: EndpointInput[VIn]
+    def handler(in: VIn): F[Either[Unit, VOut]]
+  }
 }
