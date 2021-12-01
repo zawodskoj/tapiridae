@@ -1,3 +1,5 @@
+import eio._
+
 import scala.reflect.macros.blackbox
 
 object makro {
@@ -19,7 +21,7 @@ object makro {
     import c.universe._
 
     val clsTpe = weakTypeOf[Cls]
-    val fTpe = weakTypeOf[F[_]].typeConstructor
+    val fTpe = weakTypeOf[F[_]].typeConstructor.dealias
 
     val pathAttrSym = symbolOf[attrs.path]
     val queryAttrSym = symbolOf[attrs.query]
@@ -81,10 +83,66 @@ object makro {
         inputs.map { i => indexedInputsUnordered.find(_.input == i).get }
       }
 
+      case class DecodedOutType(eo: Tree)
+
+      case class DecodedOutTypes(
+        async: Boolean,
+        isEither: Boolean,
+        outType: Option[DecodedOutType],
+        errType: Option[DecodedOutType]
+      )
+
+      val outputType = {
+        def decodeOutputType(tpe: Type, async: Boolean): DecodedOutTypes = {
+          def decodeExactOutputType(tpe: Type): Option[DecodedOutType] = {
+            val dealiased = tpe.dealias
+
+            if (dealiased.typeSymbol == symbolOf[Unit]) return None
+
+            c.inferImplicitValue(appliedType(weakTypeOf[ProvidedEndpointOutput[_]].typeConstructor, dealiased)) match {
+              case EmptyTree => c.inferImplicitValue(appliedType(weakTypeOf[EndpointOutputConstructor[_, _]], dealiased, typeOf[DefTags.JsonDefTag])) match {
+                case EmptyTree => c.abort(c.enclosingPosition, s"Failed to find PEO or EOC for type $tpe (dealiased to $dealiased)")
+                case t => Some(DecodedOutType(q"$t.instance"))
+              }
+              case t => Some(DecodedOutType(t))
+            }
+          }
+
+          if (tpe.typeConstructor.typeSymbol == weakTypeOf[Either[_, _]].typeConstructor.typeSymbol) {
+            val List(left, right) = tpe.typeArgs
+
+            DecodedOutTypes(async = async, isEither = true, outType = decodeExactOutputType(right), errType = decodeExactOutputType(left))
+          } else {
+            DecodedOutTypes(async = async, isEither = false, outType = decodeExactOutputType(tpe), errType = None)
+          }
+        }
+
+        d.returnType.typeConstructor.dealias match {
+          case tc if tc.takesTypeArgs && tc.typeSymbol == fTpe.typeSymbol =>
+            if (tc.typeParams.size == 1)
+              decodeOutputType(d.returnType.typeArgs.head, async = true)
+            else
+              c.abort(c.enclosingPosition, "Multi-arg effect type constructors are not supported now")
+          case _ =>
+            decodeOutputType(d.returnType, async = false)
+        }
+      }
+
+      println(outputType)
+
       val tupleMappingTree = {
         val args = indexedInputs.map(i => q"t.${TermName("_" + (i.index + 1))}")
+        val rawBody = q"$cls.$methodName(..$args)"
+        val monadForF = q"_root_.cats.Monad[$fTpe]"
 
-        q"{ t => $cls.$methodName(..$args) }"
+        val wrappedBody = outputType match {
+          case DecodedOutTypes(true, true, _, _) => rawBody
+          case DecodedOutTypes(true, false, _, _) => q"monadF.fmap($rawBody)(_.asRight)"
+          case DecodedOutTypes(false, true, _, _) => q"monadF.pure($rawBody)"
+          case DecodedOutTypes(false, false, _, _) => q"monadF.pure($rawBody.asRight)"
+        }
+
+        q"{ import _root_.cats.syntax.either._; val monadF = $monadForF; t => $wrappedBody }"
       }
 
       val endpointDef = {
@@ -103,7 +161,19 @@ object makro {
 
         val endpointWithPath = q"endpoint.post.in($pathInput)"
 
-        nonPathInputs.foldLeft(endpointWithPath)((e, i) => q"$e.in(${i.tree})")
+        val withInputs = nonPathInputs.foldLeft(endpointWithPath)((e, i) => q"$e.in(${i.tree})")
+
+        val withOutputs = outputType.outType match {
+          case Some(out) => q"$withInputs.out(${out.eo})"
+          case None => withInputs
+        }
+
+        val withErrors = outputType.errType match {
+          case Some(err) => q"$withOutputs.errorOut(${err.eo})"
+          case None => withOutputs
+        }
+
+        withErrors
       }
 
       q"$endpointDef.serverLogic[$fTpe]($tupleMappingTree)"
